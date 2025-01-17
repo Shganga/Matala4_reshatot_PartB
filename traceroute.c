@@ -45,7 +45,6 @@ void traceroute(const char *destination) {
     char packet[PACKET_SIZE];
     struct iphdr *ip_header;
     struct icmphdr *icmp_header;
-    struct pollfd pfds[1];
     int ttl;
 
     // Create a raw socket
@@ -72,71 +71,69 @@ void traceroute(const char *destination) {
 
     printf("traceroute to %s, %d hops max\n", destination, MAX_HOPS);
 
-    // Loop through TTL values
     for (ttl = 1; ttl <= MAX_HOPS; ttl++) {
-        printf("%2d", ttl); // Print hop number
-        int destination_reached = 0; // Flag to track if the destination is reached
-
         // Set TTL value for the socket
         if (setsockopt(sockfd, IPPROTO_IP, IP_TTL, &ttl, sizeof(ttl)) < 0) {
             perror("Error setting TTL");
             exit(1);
         }
 
-        // Send 3 probes for the current TTL
+        char ip_address[INET_ADDRSTRLEN] = "*";
+        double rtts[NUM_PROBES] = {-1, -1, -1};
+        int destination_reached = 0;
+
         for (int i = 0; i < NUM_PROBES; i++) {
             gettimeofday(&start, NULL);
-            build_icmp_packet(packet, ttl); // Build ICMP packet
+            build_icmp_packet(packet, ttl);
+
             if (sendto(sockfd, packet, PACKET_SIZE, 0, (struct sockaddr *)&dest_addr, sizeof(dest_addr)) <= 0) {
                 perror("Send failed");
                 exit(1);
             }
 
-            // Set up poll for receiving responses
-            pfds[0].fd = sockfd;
-            pfds[0].events = POLLIN;
+            char response[PACKET_SIZE];
+            struct sockaddr_in recv_addr;
+            socklen_t addr_len = sizeof(recv_addr);
 
-            int ret = poll(pfds, 1, TIMEOUT * 1000); // Timeout in milliseconds
-            if (ret > 0 && (pfds[0].revents & POLLIN)) {
-                char response[PACKET_SIZE];
-                struct sockaddr_in recv_addr;
-                socklen_t addr_len = sizeof(recv_addr);
+            int bytes_received = recvfrom(sockfd, response, sizeof(response), 0, (struct sockaddr *)&recv_addr, &addr_len);
+            gettimeofday(&end, NULL);
 
-                if (recvfrom(sockfd, response, sizeof(response), 0, (struct sockaddr *)&recv_addr, &addr_len) < 0) {
-                    perror("Recv failed");
-                    exit(1);
+            if (bytes_received > 0) {
+                if (inet_ntop(AF_INET, &(recv_addr.sin_addr), ip_address, INET_ADDRSTRLEN) == NULL) {
+                    strcpy(ip_address, "*");
                 }
 
-                gettimeofday(&end, NULL);
                 double rtt = (end.tv_sec - start.tv_sec) * 1000.0 + (end.tv_usec - start.tv_usec) / 1000.0;
+                rtts[i] = rtt;
 
-                // Extract IP and ICMP headers
                 ip_header = (struct iphdr *)response;
                 icmp_header = (struct icmphdr *)(response + (ip_header->ihl * 4));
 
-                printf(" %s %.3fms", inet_ntoa(recv_addr.sin_addr), rtt);
-
-                // Check if the destination has been reached
                 if (memcmp(&recv_addr.sin_addr, &dest_addr.sin_addr, sizeof(recv_addr.sin_addr)) == 0) {
                     destination_reached = 1;
                 }
-
-            } else {
-                printf(" *");
             }
-            if (i < NUM_PROBES - 1) printf("\t");
+        }
+
+        printf("%2d  %s  ", ttl, ip_address);
+        for (int i = 0; i < NUM_PROBES; i++) {
+            if (rtts[i] >= 0) {
+                printf("%.3fms  ", rtts[i]);
+            } else {
+                printf("*  ");
+            }
         }
         printf("\n");
 
-        // Exit if destination is reached
         if (destination_reached) {
-            printf("Destination reached\n");
+            printf("Destination reached.\n");
             break;
         }
     }
 
     close(sockfd);
 }
+
 
 
 

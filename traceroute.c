@@ -43,10 +43,10 @@ void traceroute(const char *destination) {
     struct sockaddr_in dest_addr;
     struct timeval start, end;
     char packet[PACKET_SIZE];
-    struct iphdr *ip_header;  // Use iphdr for IP header structure
+    struct iphdr *ip_header;
     struct icmphdr *icmp_header;
     struct pollfd pfds[1];
-    int ttl = 1;
+    int ttl;
 
     // Create a raw socket
     if ((sockfd = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP)) < 0) {
@@ -62,7 +62,7 @@ void traceroute(const char *destination) {
         exit(1);
     }
 
-    // Set timeout for receiving the packet
+    // Set timeout for receiving packets
     timeout.tv_sec = TIMEOUT;
     timeout.tv_usec = 0;
     if (setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0) {
@@ -72,35 +72,37 @@ void traceroute(const char *destination) {
 
     printf("traceroute to %s, %d hops max\n", destination, MAX_HOPS);
 
-    // Loop through TTL values (1 to 30)
+    // Loop through TTL values
     for (ttl = 1; ttl <= MAX_HOPS; ttl++) {
         printf("%2d", ttl); // Print hop number
+        int destination_reached = 0; // Flag to track if the destination is reached
 
-        // Set TTL value
+        // Set TTL value for the socket
         if (setsockopt(sockfd, IPPROTO_IP, IP_TTL, &ttl, sizeof(ttl)) < 0) {
             perror("Error setting TTL");
             exit(1);
         }
 
-        // Send 3 probes per hop
+        // Send 3 probes for the current TTL
         for (int i = 0; i < NUM_PROBES; i++) {
             gettimeofday(&start, NULL);
-            build_icmp_packet(packet, ttl); // Build ICMP request packet
+            build_icmp_packet(packet, ttl); // Build ICMP packet
             if (sendto(sockfd, packet, PACKET_SIZE, 0, (struct sockaddr *)&dest_addr, sizeof(dest_addr)) <= 0) {
                 perror("Send failed");
                 exit(1);
             }
 
-            // Set up the poll structure
+            // Set up poll for receiving responses
             pfds[0].fd = sockfd;
             pfds[0].events = POLLIN;
 
-            // Poll for incoming responses
             int ret = poll(pfds, 1, TIMEOUT * 1000); // Timeout in milliseconds
             if (ret > 0 && (pfds[0].revents & POLLIN)) {
                 char response[PACKET_SIZE];
-                socklen_t len = sizeof(dest_addr);
-                if (recvfrom(sockfd, response, sizeof(response), 0, (struct sockaddr *)&dest_addr, &len) < 0) {
+                struct sockaddr_in recv_addr;
+                socklen_t addr_len = sizeof(recv_addr);
+
+                if (recvfrom(sockfd, response, sizeof(response), 0, (struct sockaddr *)&recv_addr, &addr_len) < 0) {
                     perror("Recv failed");
                     exit(1);
                 }
@@ -108,14 +110,17 @@ void traceroute(const char *destination) {
                 gettimeofday(&end, NULL);
                 double rtt = (end.tv_sec - start.tv_sec) * 1000.0 + (end.tv_usec - start.tv_usec) / 1000.0;
 
-                // Cast response buffer to iphdr header
-                ip_header = (struct iphdr *)response;  // Use iphdr here
+                // Extract IP and ICMP headers
+                ip_header = (struct iphdr *)response;
+                icmp_header = (struct icmphdr *)(response + (ip_header->ihl * 4));
 
-                // Correctly calculate the position of the ICMP header
-                icmp_header = (struct icmphdr *)(response + (ip_header->ihl * 4));  // iphl is in 4-byte units
+                printf(" %s %.3fms", inet_ntoa(recv_addr.sin_addr), rtt);
 
-                // Print the IP address and RTT
-                printf(" %s %.3fms", inet_ntoa(*(struct in_addr *)&ip_header->saddr), rtt);
+                // Check if the destination has been reached
+                if (memcmp(&recv_addr.sin_addr, &dest_addr.sin_addr, sizeof(recv_addr.sin_addr)) == 0) {
+                    destination_reached = 1;
+                }
+
             } else {
                 printf(" *");
             }
@@ -123,14 +128,16 @@ void traceroute(const char *destination) {
         }
         printf("\n");
 
-        // Check if the destination has been reached
-        if (ip_header->daddr == dest_addr.sin_addr.s_addr) {
+        // Exit if destination is reached
+        if (destination_reached) {
             printf("Destination reached\n");
             break;
         }
     }
+
     close(sockfd);
 }
+
 
 
 int main(int argc, char *argv[]) {

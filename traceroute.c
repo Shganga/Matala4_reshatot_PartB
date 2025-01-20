@@ -1,6 +1,4 @@
 #include "traceroute.h"
-#include <netinet/ip.h>
-#include <netinet/ip_icmp.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -9,7 +7,9 @@
 #include <sys/time.h>
 #include <unistd.h>
 #include <poll.h>
+#include <netinet/ip_icmp.h>
 
+// Global variables for destination address and timeout
 struct sockaddr_in dest_addr;
 struct timeval timeout;
 
@@ -28,23 +28,35 @@ unsigned short checksum(void *b, int len) {
     return result;
 }
 
-void build_icmp_packet(char *packet, int ttl) {
+void build_ip_header(struct ip_header *iph, uint32_t src_addr, uint32_t dest_addr, uint8_t ttl) {
+    memset(iph, 0, sizeof(struct ip_header));
+    iph->version_ihl = (4 << 4) | (sizeof(struct ip_header) / 4); // Version: 4, Header Length: 5 (20 bytes)
+    iph->tos = 0;
+    iph->total_length = htons(sizeof(struct ip_header) + PACKET_SIZE);
+    iph->identification = htons(rand() % 65536);
+    iph->flags_offset = htons(0);
+    iph->ttl = ttl;
+    iph->protocol = IPPROTO_ICMP;
+    iph->checksum = 0; // Will be calculated later
+    iph->src_addr = src_addr;
+    iph->dest_addr = dest_addr;
+    iph->checksum = checksum((void *)iph, sizeof(struct ip_header));
+}
+
+void build_icmp_packet(char *packet, int seq) {
     struct icmphdr *icmp = (struct icmphdr *)packet;
     icmp->type = ICMP_ECHO;
     icmp->code = 0;
     icmp->un.echo.id = getpid();
-    icmp->un.echo.sequence = ttl;
+    icmp->un.echo.sequence = seq;
     icmp->checksum = 0; // Initially set to 0
     icmp->checksum = checksum(packet, PACKET_SIZE);
 }
 
 void traceroute(const char *destination) {
     int sockfd;
-    struct sockaddr_in dest_addr;
     struct timeval start, end;
     char packet[PACKET_SIZE];
-    struct iphdr *ip_header;
-    struct icmphdr *icmp_header;
     int ttl;
 
     // Create a raw socket
@@ -106,10 +118,10 @@ void traceroute(const char *destination) {
                 double rtt = (end.tv_sec - start.tv_sec) * 1000.0 + (end.tv_usec - start.tv_usec) / 1000.0;
                 rtts[i] = rtt;
 
-                ip_header = (struct iphdr *)response;
-                icmp_header = (struct icmphdr *)(response + (ip_header->ihl * 4));
+                struct ip_header *ip_hdr = (struct ip_header *)response;
+                struct icmphdr *icmp_hdr = (struct icmphdr *)(response + (ip_hdr->version_ihl & 0x0F) * 4);
 
-                if (memcmp(&recv_addr.sin_addr, &dest_addr.sin_addr, sizeof(recv_addr.sin_addr)) == 0) {
+                if (icmp_hdr->type == ICMP_ECHOREPLY || memcmp(&recv_addr.sin_addr, &dest_addr.sin_addr, sizeof(recv_addr.sin_addr)) == 0) {
                     destination_reached = 1;
                 }
             }
@@ -133,9 +145,6 @@ void traceroute(const char *destination) {
 
     close(sockfd);
 }
-
-
-
 
 int main(int argc, char *argv[]) {
     if (argc != 3 || strcmp(argv[1], "-a") != 0) {
